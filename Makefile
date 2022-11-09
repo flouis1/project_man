@@ -1,7 +1,7 @@
 build_linux:
-	env GOOS=linux GOARCH=amd64 go build -o project-man
+	env GOOS=linux GOARCH=amd64 go build -o project_man
 build:
-	go build -o project-man
+	go build -o project_man
 
 run:
-	./project-man diff create psemea fabienl 
+	./project_man diff create psemea fabienl 

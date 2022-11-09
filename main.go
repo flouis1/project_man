@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/jfrog/jfrog-cli-core/v2/plugins"
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
-	"github.com/jfrog/project_man/commands"
+	"project_man/commands"
 )
 
 func main() {
@@ -12,9 +12,9 @@ func main() {
 
 func getApp() components.App {
 	app := components.App{}
-	app.Name = "project-man"
-	app.Description = "Easily greet anyone."
-	app.Version = "v0.1.2"
+	app.Name = "project_man"
+	app.Description = "Provide a project diff between 2 JPD"
+	app.Version = "v0.1.0"
 	app.Commands = getCommands()
 	return app
 }

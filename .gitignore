@@ -16,3 +16,6 @@ jfrog-cli-plugin-template
 
 # IOS
 *.DS_Store
+
+# Executable
+project_man
