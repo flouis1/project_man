@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/ioutil"
 	"net/http"
+	"time"
 
 	"github.com/jfrog/jfrog-cli-core/v2/common/commands"
 	"github.com/jfrog/jfrog-cli-core/v2/plugins/components"
@@ -93,7 +94,15 @@ func diffCmd(c *components.Context) error {
 	if rtDetails.User != "" {
 		return errors.New("Please configure you 'server ID' with a token and not 'User & Password'")
 	}
-	getProjects(rtDetails.Url, rtDetails.AccessToken, stDetails.Url, stDetails.AccessToken)
+
+	switch conf.diffType {
+	case "create":
+		getProjects(rtDetails.Url, rtDetails.AccessToken, stDetails.Url, stDetails.AccessToken)
+	case "delete":
+		findDeletedProjects(rtDetails.Url, rtDetails.AccessToken, stDetails.Url, stDetails.AccessToken)
+	}
+	//getProjects(rtDetails.Url, rtDetails.AccessToken, stDetails.Url, stDetails.AccessToken)
+	//findDeletedProjects(rtDetails.Url, rtDetails.AccessToken, stDetails.Url, stDetails.AccessToken)
 	return nil
 }
 
@@ -142,8 +151,6 @@ func validateProfiles(src string, dst string) bool {
 
 }
 
-////////////////// PROJECT FUNCTIONS
-
 type Project struct {
 	DisplayName     string `json:"display_name"`
 	Description     string `json:"description"`
@@ -157,7 +164,6 @@ type Project struct {
 	StorageQuotaEmailNotification bool   `json:"storage_quota_email_notification"`
 	ProjectKey                    string `json:"project_key"`
 }
-
 
 type Users struct {
 	Members []struct {
@@ -173,25 +179,55 @@ type Roles struct {
 	Environments []string `json:"environments"`
 }
 
+func findDeletedProjects(src_url string, src_token string, dst_url string, dst_token string) ([]Project, error) {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", dst_url+"access/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+dst_token)
+
+	// run query and parse it
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+
+	if err != nil {
+		return nil, err
+	}
+	var project []Project
+	json.Unmarshal(body, &project)
+
+	sum := 0
+	for i, p := range project {
+		getProject(p.ProjectKey, src_url, src_token, dst_url, dst_token)
+		sum += i
+	}
+	return project, err
+}
+
 func getProjects(src_url string, src_token string, dst_url string, dst_token string) ([]Project, error) {
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects", nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 
-    if err != nil {
-        return nil, err
-    }
+	if err != nil {
+		return nil, err
+	}
 	var project []Project
 	json.Unmarshal(body, &project)
 
@@ -201,95 +237,124 @@ func getProjects(src_url string, src_token string, dst_url string, dst_token str
 		createProject(p.ProjectKey, src_url, src_token, dst_url, dst_token)
 		updateProject(p.ProjectKey, src_url, src_token, dst_url, dst_token)
 		updateUsers(p.ProjectKey, src_url, src_token, dst_url, dst_token)
-		listRoles(p.ProjectKey, src_url, src_token, dst_url, dst_token)
+		createRoles(p.ProjectKey, src_url, src_token, dst_url, dst_token)
 		updateGroups(p.ProjectKey, src_url, src_token, dst_url, dst_token)
+		findDeletedRoles(p.ProjectKey, src_url, src_token, dst_url, dst_token)
 
 		sum += i
 	}
-    return project, err
+	return project, err
 }
 
-func createProject(project_name string, src_url string, src_token string, dst_url string, dst_token string) error{
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name, nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+func getProject(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
-	log.Debug("The following configuration will be used : \n" + string(body))
-    request_body := bytes.NewReader(body)
-
-    request, err := http.NewRequest("POST", dst_url + "access/api/v1/projects", request_body)
-    request.Header.Set("Authorization", "Bearer "+ dst_token)
-    request.Header.Set("Content-Type", "application/json")
-    response, err := http.DefaultClient.Do(request)
-
-    if err != nil {
-        return err
-    }
-    defer response.Body.Close()
-
-    return err
+	body, err := ioutil.ReadAll(resp.Body)
+	if resp.StatusCode == 404 {
+		log.Info("------------------------------------------")
+		log.Info("Project will " + project_name + " be deleted In the following JPD " + dst_url)
+		deleteProject(project_name, dst_url, dst_token)
+		log.Debug(resp.Status)
+		return err
+	}else{
+		log.Info("Project " + project_name + " exists In the following JPD " + dst_url)
+	}
+	bytes.NewReader(body)
+	return err
 }
 
-func updateProject(project_name string, src_url string, src_token string, dst_url string, dst_token string) error{
-    log.Info("The following project will be updated : " + project_name)
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name, nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+func createProject(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	log.Debug("The following configuration will be used : \n" + string(body))
-    request_body := bytes.NewReader(body)
+	request_body := bytes.NewReader(body)
 
-    request, err := http.NewRequest("PUT", dst_url + "access/api/v1/projects/" + project_name, request_body)
-    request.Header.Set("Authorization", "Bearer "+ dst_token)
-    request.Header.Set("Content-Type", "application/json")
-    response, err := http.DefaultClient.Do(request)
+	request, err := http.NewRequest("POST", dst_url+"access/api/v1/projects", request_body)
+	request.Header.Set("Authorization", "Bearer "+dst_token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
 
-    if response.StatusCode != 200 {
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	return err
+}
+
+func updateProject(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	log.Info("The following project will be updated : " + project_name)
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
+
+	// run query and parse it
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	log.Debug("The following configuration will be used : \n" + string(body))
+	request_body := bytes.NewReader(body)
+
+	request, err := http.NewRequest("PUT", dst_url+"access/api/v1/projects/"+project_name, request_body)
+	request.Header.Set("Authorization", "Bearer "+dst_token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+
+	if response.StatusCode != 200 {
 		log.Error(response)
-        return err
+		return err
 	} else {
-		log.Info("🐸 Project " + project_name + " is Up to date !!")
-    }
-    defer response.Body.Close()
+		log.Info("🐸 Project " + project_name + " is Up to date")
+	}
+	defer response.Body.Close()
 
-    return err
+	return err
 }
 
-func updateUsers(project_name string, src_url string, src_token string, dst_url string, dst_token string) error{
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/users", nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+func updateUsers(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/users", nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	var auto Users
 	json.Unmarshal(body, &auto)
 
@@ -301,58 +366,57 @@ func updateUsers(project_name string, src_url string, src_token string, dst_url 
 	return err
 }
 
-func createUser(project_name string, user_name string, src_url string, src_token string, dst_url string, dst_token string) error{
+func createUser(project_name string, user_name string, src_url string, src_token string, dst_url string, dst_token string) error {
 	// Get user details in the src JPD
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/users/" + user_name, nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/users/"+user_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	log.Debug("The following configuration will be used : \n" + string(body))
-    request_body := bytes.NewReader(body)
+	request_body := bytes.NewReader(body)
 
-    request, err := http.NewRequest("PUT", dst_url + "access/api/v1/projects/" + project_name + "/users/" + user_name, request_body)
-    request.Header.Set("Authorization", "Bearer "+ dst_token)
-    request.Header.Set("Content-Type", "application/json")
-    response, err := http.DefaultClient.Do(request)
+	request, err := http.NewRequest("PUT", dst_url+"access/api/v1/projects/"+project_name+"/users/"+user_name, request_body)
+	request.Header.Set("Authorization", "Bearer "+dst_token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
 
-    if response.StatusCode != 200 {
-		log.Warn("❌ 👤 " + user_name + " Not Added !!")
+	if response.StatusCode != 200 {
+		log.Warn("❌ 👤 " + user_name + " Not Added")
 		log.Debug(response)
-        return err
+		return err
 	} else {
-		log.Info("🐸 👤 " + user_name + " Added !!")
-    }
-    defer response.Body.Close()
+		log.Info("🐸 👤 " + user_name + " Added")
+	}
+	defer response.Body.Close()
 
-    return err
+	return err
 }
 
+func updateGroups(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/groups", nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-func updateGroups(project_name string, src_url string, src_token string, dst_url string, dst_token string) error{
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/groups", nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	var auto Users
 	json.Unmarshal(body, &auto)
 
@@ -364,167 +428,253 @@ func updateGroups(project_name string, src_url string, src_token string, dst_url
 	return err
 }
 
-
-func creategroups(project_name string, group_name string, src_url string, src_token string, dst_url string, dst_token string) error{
+func creategroups(project_name string, group_name string, src_url string, src_token string, dst_url string, dst_token string) error {
 	// Get user details in the src JPD
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/groups/" + group_name, nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/groups/"+group_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	log.Debug("The following configuration will be used : \n" + string(body))
-    request_body := bytes.NewReader(body)
+	request_body := bytes.NewReader(body)
 
-    request, err := http.NewRequest("PUT", dst_url + "access/api/v1/projects/" + project_name + "/groups/" + group_name, request_body)
-    request.Header.Set("Authorization", "Bearer "+ dst_token)
-    request.Header.Set("Content-Type", "application/json")
-    response, err := http.DefaultClient.Do(request)
+	request, err := http.NewRequest("PUT", dst_url+"access/api/v1/projects/"+project_name+"/groups/"+group_name, request_body)
+	request.Header.Set("Authorization", "Bearer "+dst_token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
 
-    if response.StatusCode != 200 {
-		log.Warn("❌ 👥 " + group_name + " Not Added !!")
+	if response.StatusCode != 200 {
+		log.Warn("❌ 👥 " + group_name + " Not Added")
 		log.Debug(response)
-        return err
+		return err
 	} else {
-		log.Info("🐸 👥 " + group_name + " Added !!")
-    }
-    defer response.Body.Close()
+		log.Info("🐸 👥 " + group_name + " Added")
+	}
+	defer response.Body.Close()
 
-    return err
+	return err
 }
 
-/* error seen project role need to be created before assign groups to a project
- 2 solutions
-1 => create a role if not found
-	How to update roles?
-	How to delete roles
-2 => List roles then create 
-	easy to clean and to update
-*/
-func listRoles(project_name string, src_url string, src_token string, dst_url string, dst_token string) error{
+func listRoles(projectName string, url string, token string) ([]Roles, error) {
     // prepare HTTP request
     client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/roles", nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
-
+    req, err := http.NewRequest("GET", url+"access/api/v1/projects/"+projectName+"/roles", nil)
+    req.Header.Set("Authorization", "Bearer "+token)
     // run query and parse it
     resp, err := client.Do(req)
-
     if err != nil {
-        return err
+        return nil, err
     }
     defer resp.Body.Close()
-
     body, err := ioutil.ReadAll(resp.Body)
-	var auto []Roles
-	json.Unmarshal(body, &auto)
+    var auto []Roles
+    json.Unmarshal(body, &auto)
+    return auto, err
+}
 
+func DetailRole(projectName string, url string, token string) ([]Roles, error) {
+    // prepare HTTP request
+    client := &http.Client{}
+    req, err := http.NewRequest("GET", url+"access/api/v1/projects/"+projectName+"/roles", nil)
+    req.Header.Set("Authorization", "Bearer "+token)
+    // run query and parse it
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    body, err := ioutil.ReadAll(resp.Body)
+    var auto []Roles
+    json.Unmarshal(body, &auto)
+    return auto, err
+}
+
+func createRoles(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+
+	roles, err := listRoles(project_name, src_url, src_token)
 	sum := 0
-	for i, p := range auto {
-		createRole(project_name, p.Name, src_url, src_token, dst_url, dst_token)
-		//log.Warn(p.Name)
+	for i, p := range roles {
+		manageRoles(project_name, p.Name, src_url, src_token, dst_url, dst_token)
 		sum += i
 	}
 	return err
 }
 
-func createRole(project_name string, role_name string, src_url string, src_token string, dst_url string, dst_token string) error{
-	// Get user details in the src JPD
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/roles/" + role_name, nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
+func manageRoles(project_name string, role_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// prepare HTTP request
+	client := http.Client{
+		Timeout: 30 * time.Second,
+	}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/roles/"+role_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-    // run query and parse it
-    resp, err := client.Do(req)
+	// run query and parse it
+	resp, err := client.Do(req)
 
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-    body, err := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	log.Debug("The following configuration will be used : \n" + string(body))
-    request_body := bytes.NewReader(body)
+	request_body := bytes.NewReader(body)
 
-    request, err := http.NewRequest("POST", dst_url + "access/api/v1/projects/" + project_name + "/roles", request_body)
-    request.Header.Set("Authorization", "Bearer "+ dst_token)
-    request.Header.Set("Content-Type", "application/json")
-    response, err := http.DefaultClient.Do(request)
-    
+	request, err := http.NewRequest("POST", dst_url+"access/api/v1/projects/"+project_name+"/roles", request_body)
+	request.Header.Set("Authorization", "Bearer "+dst_token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+
 	/* 201: Created
-	   409: Conflit (Role mus be updated)
-	   400: Bad Request
-	   		seen for basics roles (ex: Admin, Release Manager)
-	 TODO: handle the 400 error code
+	  409: Conflit (Role mus be updated)
+	  400: Bad Request
+	  		seen for basics roles (ex: Admin, Release Manager)
+	TODO: handle the 400 error code
 	*/
-    if (response.StatusCode == 201)|| (response.StatusCode == 400) {
+	if (response.StatusCode == 201) || (response.StatusCode == 400) {
 		log.Info("🐸 Role " + role_name + " Added")
 	} else if response.StatusCode == 409 {
 		updateRole(project_name, role_name, src_url, src_token, dst_url, dst_token)
 	} else {
 		log.Error(response.StatusCode)
-		log.Warn("❌ Role " + role_name + " Not Added !!")
+		log.Warn("❌ Role " + role_name + " Not Added")
 		log.Error(response)
 		return err
-    }
-    defer response.Body.Close()
-
-    return err
-}
-
-func updateRole(project_name string, role_name string, src_url string, src_token string, dst_url string, dst_token string) error{
-	// Get user details in the src JPD
-    // prepare HTTP request
-    client := &http.Client{}
-    req, err := http.NewRequest("GET", src_url + "access/api/v1/projects/" + project_name + "/roles/" + role_name, nil)
-    req.Header.Set("Authorization", "Bearer "+ src_token)
-
-    // run query and parse it
-    resp, err := client.Do(req)
-
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-
-    body, err := ioutil.ReadAll(resp.Body)
-	log.Debug("The following configuration will be used : \n" + string(body))
-    request_body := bytes.NewReader(body)
-
-    request, err := http.NewRequest("PUT", dst_url + "access/api/v1/projects/" + project_name + "/roles/" + role_name, request_body)
-    request.Header.Set("Authorization", "Bearer "+ dst_token)
-    request.Header.Set("Content-Type", "application/json")
-    response, err := http.DefaultClient.Do(request)
-    if (response.StatusCode == 200) {
-		log.Info("🐸 Role " + role_name + " Updated")
-	}else {
-		log.Error(response.StatusCode)
-		log.Warn("❌ Role " + role_name + " Not Added !!")
-		log.Error(response)
-		return err
-    }
-    defer response.Body.Close()
+	}
+	defer response.Body.Close()
 
 	return err
 }
 
-/*
-What i want to do
+func updateRole(project_name string, role_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/roles/"+role_name, nil)
+	req.Header.Set("Authorization", "Bearer "+src_token)
 
-Source
-1 list projects and return 'project_key'
+	// run query and parse it
+	resp, err := client.Do(req)
 
-Target
-1 update projects with a for loop
-2 if project key not found create it
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-*/
+	body, err := ioutil.ReadAll(resp.Body)
+	log.Debug("The following configuration will be used : \n" + string(body))
+	request_body := bytes.NewReader(body)
+
+	request, err := http.NewRequest("PUT", dst_url+"access/api/v1/projects/"+project_name+"/roles/"+role_name, request_body)
+	request.Header.Set("Authorization", "Bearer "+dst_token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if response.StatusCode == 200 {
+		log.Info("🐸 Role " + role_name + " Updated")
+	} else {
+		log.Error(response.StatusCode)
+		log.Warn("❌ Role " + role_name + " Not Added")
+		log.Debug(response.StatusCode)
+		log.Debug(response)
+		return err
+	}
+	defer response.Body.Close()
+
+	return err
+}
+
+func findDeletedRoles(project_name string, src_url string, src_token string, dst_url string, dst_token string) error {
+	// List roles
+	dst_roles, err := listRoles(project_name, dst_url, dst_token)
+
+	// Find roles not in source project
+	sum := 0
+	for i, s := range dst_roles {
+		// prepare HTTP request
+		client := http.Client{
+			Timeout: 30 * time.Second,
+		}
+		log.Debug(project_name)
+		log.Debug(s.Name)
+		req, err := http.NewRequest("GET", src_url+"access/api/v1/projects/"+project_name+"/roles/"+s.Name, nil)
+		req.Header.Set("Authorization", "Bearer "+src_token)
+
+		// run query and parse it
+		resp, err := client.Do(req)
+
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		log.Debug(resp.StatusCode)
+		sum += i
+		if resp.StatusCode == 404{
+			log.Info("Role " + s.Name + " Not found in project " + project_name + " of " + src_url + " JPD")
+			log.Info("Role " + s.Name + " Will be removed in the ")
+			deleteRole(s.Name, project_name, dst_url, dst_token)
+		}
+	}
+	
+	// Delete projects
+	return err
+}
+
+func delProjects(url string, token string,) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url+"access/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// run query and parse it
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+	log.Debug(resp)
+	defer resp.Body.Close()
+
+	return err
+}
+
+func deleteProject(proj_key string, url string, token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("DELETE", url+"access/api/v1/projects/"+proj_key, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// run query and parse it
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+	log.Debug(resp.StatusCode)
+	defer resp.Body.Close()
+	return err
+}
+
+func deleteRole(role_name string, proj_key string, url string, token string) error {
+	// prepare HTTP request
+	client := &http.Client{}
+	req, err := http.NewRequest("DELETE", url + "access/api/v1/projects/"+ proj_key + "/roles/" + role_name, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// run query and parse it
+	resp, err := client.Do(req)
+
+	if err != nil {
+		return err
+	}
+	log.Debug(resp.StatusCode)
+	defer resp.Body.Close()
+	return err
+}
