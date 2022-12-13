@@ -12,7 +12,7 @@ func main() {
 
 func getApp() components.App {
 	app := components.App{}
-	app.Name = "project_man"
+	app.Name = "proj-sync"
 	app.Description = "Provide a project diff between 2 JPD"
 	app.Version = "v0.1.0"
 	app.Commands = getCommands()
